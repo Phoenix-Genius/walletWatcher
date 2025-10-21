@@ -1,0 +1,17 @@
+{
+  "name": "walletwatcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "CLI to check an EVM wallet's native-coin balance across common EVM networks.",
+  "scripts": {
+    "start": "node src/check-balances.mjs",
+    "check": "node src/check-balances.mjs",
+    "watch": "node src/watch.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^6.10.0",
+    "nodemailer": "^6.10.1"
+  }
+}
