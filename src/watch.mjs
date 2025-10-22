@@ -207,7 +207,7 @@ async function processWallet(address) {
     state.lastUsdMicro = totalUsdMicro;
     walletState.set(address, state);
     console.log(`[init] ${shortAddr(address)} ≈ ~$${fmtMicroUSD(totalUsdMicro)}`);
-    return;
+    return null;
   }
 
   const last = state.lastUsdMicro;
@@ -218,6 +218,9 @@ async function processWallet(address) {
     console.log(`[skip] ${shortAddr(address)} change but some networks errored.`);
     shouldEmail = false;
   }
+
+  let chosenSnap = snap;
+  let chosenTotal = totalUsdMicro;
   if (shouldEmail) {
     try {
       const confirmSnap = await fetchAllBalances(address);
@@ -227,33 +230,31 @@ async function processWallet(address) {
         console.log(`[skip] ${shortAddr(address)} change did not confirm.`);
         shouldEmail = false;
       } else {
-        Object.assign(snap, confirmSnap);
-        // update total to confirmed value for email text
-        Object.assign({});
+        chosenSnap = confirmSnap;
+        chosenTotal = confirmMicro;
       }
     } catch (_) { /* ignore confirm errors */ }
   }
-  if (shouldEmail) {
-    const subject = `${shortAddr(address)}: ~$${fmtMicroUSD(deltaMicro)} (now ~$${fmtMicroUSD(totalUsdMicro)})`;
-    const lines = [
-      `Address: ${address}`,
-      `Change: ~$${fmtMicroUSD(deltaMicro)}`,
-      `Now: ~$${fmtMicroUSD(totalUsdMicro)}`,
-      '',
-      ...snap.map((it) => {
-        if (it.error) return `- ${it.net.name}: ERROR ${it.error}`;
-        const usdt = it.tokens.USDT && !it.tokens.USDT.error ? it.tokens.USDT.formatted : '0';
-        const usdc = it.tokens.USDC && !it.tokens.USDC.error ? it.tokens.USDC.formatted : '0';
-        return `- ${it.net.name}: USDT=${usdt}, USDC=${usdc}`;
-      })
-    ];
-    await sendEmail(subject, lines.join('\n'));
-    state.lastUsdMicro = totalUsdMicro;
-    walletState.set(address, state);
-    console.log(`[email] ${subject}`);
-  } else {
+
+  if (!shouldEmail) {
     console.log(`[tick] ${shortAddr(address)} ~$${fmtMicroUSD(totalUsdMicro)} (Δ ${fmtMicroUSD(deltaMicro)} < ${usdDelta})`);
+    return null;
   }
+
+  const lines = [
+    `Address: ${address}`,
+    `Change: ~$${fmtMicroUSD(deltaMicro)}`,
+    `Now: ~$${fmtMicroUSD(chosenTotal)}`,
+    '',
+    ...chosenSnap.map((it) => {
+      if (it.error) return `- ${it.net.name}: ERROR ${it.error}`;
+      const usdt = it.tokens.USDT && !it.tokens.USDT.error ? it.tokens.USDT.formatted : '0';
+      const usdc = it.tokens.USDC && !it.tokens.USDC.error ? it.tokens.USDC.formatted : '0';
+      return `- ${it.net.name}: USDT=${usdt}, USDC=${usdc}`;
+    })
+  ];
+
+  return { address, deltaMicro, totalUsdMicro: chosenTotal, lines };
 }
 
 async function pMap(items, mapper, limit) {
@@ -272,7 +273,20 @@ async function pMap(items, mapper, limit) {
 
 async function runCycle(addresses) {
   console.log(`Cycle start: ${addresses.length} wallet(s), concurrency ${concurrency}`);
-  await pMap(addresses, (a) => processWallet(a), concurrency);
+  const results = await pMap(addresses, (a) => processWallet(a), concurrency);
+  const changes = results.filter((r) => r && typeof r === 'object');
+  if (changes.length > 0) {
+    const subject = `Wallet changes this cycle: ${changes.length} wallet(s)`;
+    const body = changes.map((c) => c.lines.join('\n')).join('\n\n---\n\n');
+    await sendEmail(subject, body);
+    // Update state after email attempt (even if emailTo missing, advance state to avoid repeated alerts)
+    for (const c of changes) {
+      const st = walletState.get(c.address) || { lastUsdMicro: null };
+      st.lastUsdMicro = c.totalUsdMicro;
+      walletState.set(c.address, st);
+    }
+    console.log(`[email] ${subject}`);
+  }
   console.log(`Cycle end.`);
 }
 
