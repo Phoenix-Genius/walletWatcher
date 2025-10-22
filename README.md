@@ -11,7 +11,6 @@ Features
 - Override public RPCs with your own endpoints via environment variables
  - ERC‑20 balances for USDT/USDC with proper decimal formatting
  - Wallet watcher with polling interval and email alerts
- - Emails can include recent transfer details (token, direction, counterparty, time, tx)
  - Noise protection: integer micro‑USD math + confirmation recheck to avoid false positives
 
 Setup
@@ -55,30 +54,27 @@ Run
 	- bash
 	- npm run start -- 0xYourAddress --timeout=12000
 
-Watch a wallet and email on ~$0.1 changes
+Watch wallets and email on ~$0.1 changes
 - Configure SMTP (env or defaults):
 	- .env keys: SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, EMAIL_TO, EMAIL_FROM
-- Run daemon watcher (single address):
+- Run daemon watcher (single or multiple addresses):
 	- bash
 	- npm run watch -- 0xYourAddress --usdDelta=0.1 --interval=30000 --only=eth,polygon,bsc
+	- npm run watch -- 0xAddr1 0xAddr2 0xAddr3 --usdDelta=0.1 --interval=30000
+	- Or place addresses in a file named `wallet-addresses` (one per line) and just run:
+	- npm run watch -- --usdDelta=0.1 --interval=30000
+	- Use a custom file name with --file=addresses.txt
 	- Omit --only to watch all configured networks.
 
 Watch multiple wallets
-- Pass multiple addresses positionally:
-	- bash
-	- npm run watch -- 0xAddr1 0xAddr2 0xAddr3 --usdDelta=0.1 --interval=30000
-- Or provide a file with one address per line:
-	- bash
-	- npm run watch -- --file=addresses.txt --usdDelta=0.1 --interval=30000
-- Optional: run a single iteration for a quick check (no loop):
-	- bash
-	- npm run watch -- 0xAddr1 0xAddr2 --once
+- Place one address per line in `wallet-addresses` (default file name) or pass a custom file via `--file=...`.
+- You can also pass multiple addresses positionally.
+- The watcher maintains per-wallet state and emails per-wallet when the delta threshold is crossed.
 
 Watcher details
 - Polling: yes. Default interval 30000 ms. Change with --interval=MS.
 - Threshold: default ~$0.1 stablecoin delta; change with --usdDelta.
 - Stablecoins used: USDT, USDC (decimal‑aware formatting and math).
-- Transfer details: Emails include recent ERC‑20 transfers (IN/OUT, amount, counterparty, timestamp, tx) since last tick with a safe confirmation buffer.
 - Anti‑noise protections:
 	- Sums balances using integer micro‑USD (no float drift)
 	- Confirmation recheck before emailing
@@ -94,8 +90,9 @@ Email recipient examples
 	- npm run watch -- 0xYourAddress --usdDelta=0.1 --interval=30000
 
 Notes on multi-wallet mode
-- Each wallet maintains its own state (last stablecoin total and last processed block per chain).
+- Each wallet maintains its own state (last stablecoin total).
 - Emails are sent per-wallet; the same EMAIL_TO/--emailTo applies to all watched wallets in that process.
+- Concurrency for polling can be tuned via `--concurrency=50` or env `CONCURRENCY`.
 
 Advanced config (env)
 - SAFE_CONFIRMATIONS=3               # confirmations to wait before reporting transfers
