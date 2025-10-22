@@ -61,15 +61,31 @@ Watch wallets and email on ~$0.1 changes
 	- bash
 	- npm run watch -- 0xYourAddress --usdDelta=0.1 --interval=30000 --only=eth,polygon,bsc
 	- npm run watch -- 0xAddr1 0xAddr2 0xAddr3 --usdDelta=0.1 --interval=30000
-	- Or place addresses in a file named `wallet-addresses` (one per line) and just run:
+	- Preferred: create `wallets.json` with structure:
+	  [
+	    {
+	      "user": "alex",
+	      "wallets": [
+	        { "label": "exodus", "address": "0x...", "email": "alex@example.com" }
+	      ]
+	    }
+	  ]
+	  Then run: npm run watch -- --config=wallets.json --usdDelta=0.1 --interval=30000
+	- Legacy: place addresses in a file named `wallet-addresses` (one per line) and just run:
 	- npm run watch -- --usdDelta=0.1 --interval=30000
 	- Use a custom file name with --file=addresses.txt
 	- Omit --only to watch all configured networks.
 
 Watch multiple wallets
-- Place one address per line in `wallet-addresses` (default file name) or pass a custom file via `--file=...`.
+- Preferred: `wallets.json` supports per-wallet labels and emails under each user; emails are grouped per recipient each cycle.
+- Legacy: place one address per line in `wallet-addresses` (default file name) or pass a custom file via `--file=...`.
 - You can also pass multiple addresses positionally.
-- The watcher maintains per-wallet state and emails per-wallet when the delta threshold is crossed.
+- You can label wallets by adding a label alongside the address. Supported formats per line:
+	- `0xAddress, My Label`
+	- `My Label, 0xAddress`
+	- `My Label 0xAddress` (space separated)
+	The label will appear in logs and emails as `My Label (0x1234...abcd)`.
+- The watcher maintains per-wallet state and sends a single aggregated email per cycle with all changed wallets.
 
 Watcher details
 - Polling: yes. Default interval 30000 ms. Change with --interval=MS.
@@ -91,7 +107,7 @@ Email recipient examples
 
 Notes on multi-wallet mode
 - Each wallet maintains its own state (last stablecoin total).
-- Emails are sent per-wallet; the same EMAIL_TO/--emailTo applies to all watched wallets in that process.
+- Emails are aggregated per cycle; recipients are grouped by wallet-specific email (fallback to EMAIL_TO/--emailTo).
 - Concurrency for polling can be tuned via `--concurrency=50` or env `CONCURRENCY`.
 
 Advanced config (env)

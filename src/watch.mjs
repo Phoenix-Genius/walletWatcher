@@ -17,8 +17,10 @@ const ERC20_ABI = [
 const tokenMetaCache = new Map();
 
 function usageAndExit() {
-  console.error('Usage: npm run watch -- [<EVM_ADDRESS> ...] [--file=wallet-addresses] [--only=eth,polygon,...] [--interval=30000] [--usdDelta=0.1] [--emailTo=addr] [--concurrency=50]');
-  console.error('Tip: Put one address per line in a file named "wallet-addresses" and run with no positional args.');
+  console.error('Usage: npm run watch -- [--config=wallets.json] [<EVM_ADDRESS> ...] [--file=wallet-addresses] [--only=eth,polygon,...] [--interval=30000] [--usdDelta=0.1] [--emailTo=addr] [--concurrency=50]');
+  console.error('Tips:');
+  console.error(' - Preferred: provide wallets in wallets.json as [{"user":"alex","wallets":[{"label":"exodus","address":"0x...","email":"you@example.com"}]}]');
+  console.error(' - Legacy: one address per line in wallet-addresses (comments supported).');
   process.exit(1);
 }
 
@@ -44,8 +46,37 @@ const emailTo = opts.emailTo || process.env.EMAIL_TO;
 const allowErrorsForEmail = (opts.allowErrors || process.env.ALLOW_ERRORS_FOR_EMAIL || 'false') === 'true';
 const concurrency = Math.max(1, Number(opts.concurrency || process.env.CONCURRENCY || 50));
 
-// Resolve addresses: positional + optional file (default: ./wallet-addresses)
+// Resolve addresses: JSON config (default: ./wallets.json), legacy file (./wallet-addresses), positional
+const configPath = resolvePath(process.cwd(), String(opts.config || 'wallets.json'));
 const filePath = resolvePath(process.cwd(), String(opts.file || 'wallet-addresses'));
+function parseAddrLabel(input) {
+  const line = input.trim();
+  if (!line) return null;
+  // CSV style first
+  const parts = line.split(',').map((s) => s.trim()).filter(Boolean);
+  const isAddr = (x) => {
+    try { return isAddress(x); } catch { return false; }
+  };
+  if (parts.length >= 2) {
+    if (isAddr(parts[0])) return { address: getAddress(parts[0]), label: parts.slice(1).join(',') };
+    if (isAddr(parts[parts.length - 1])) return { address: getAddress(parts[parts.length - 1]), label: parts.slice(0, -1).join(',') };
+  }
+  // Whitespace split fallback
+  const tokens = line.split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2) {
+    const addrIdx = tokens.findIndex((t) => isAddr(t));
+    if (addrIdx >= 0) {
+      const addr = getAddress(tokens[addrIdx]);
+      const labelTokens = tokens.slice(0, addrIdx).concat(tokens.slice(addrIdx + 1));
+      const label = labelTokens.join(' ').trim();
+      return { address: addr, label };
+    }
+  }
+  // Single token: maybe just address
+  if (isAddr(line)) return { address: getAddress(line), label: '' };
+  return null;
+}
+
 async function readAddressesFromFileMaybe() {
   if (!existsSync(filePath)) return [];
   const raw = await readFile(filePath, 'utf8');
@@ -53,19 +84,62 @@ async function readAddressesFromFileMaybe() {
   for (const line of raw.split(/\r?\n/)) {
     const t = line.trim();
     if (!t || t.startsWith('#') || t.startsWith('//') || t.startsWith(';')) continue;
-    if (!isAddress(t)) { console.warn('Skipping invalid address in file:', t); continue; }
-    out.push(getAddress(t));
+    const parsed = parseAddrLabel(t);
+    if (!parsed) { console.warn('Skipping invalid address/line in file:', t); continue; }
+    out.push(parsed); // { address, label }
   }
   return out;
 }
 
-function normalizeAddresses(arr) {
-  const set = new Set();
-  for (const a of arr) {
-    if (!isAddress(a)) { console.warn('Skipping invalid address:', a); continue; }
-    set.add(getAddress(a));
+async function readAddressesFromJsonMaybe() {
+  if (!existsSync(configPath)) return [];
+  try {
+    const raw = await readFile(configPath, 'utf8');
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data)) throw new Error('config root must be an array');
+    const out = [];
+    for (const user of data) {
+      const uname = typeof user?.user === 'string' ? user.user : undefined;
+    const uemail = typeof user?.email === 'string' && user.email.includes('@') ? user.email : undefined;
+      const wallets = Array.isArray(user?.wallets) ? user.wallets : [];
+      for (const w of wallets) {
+        const addr = typeof w?.address === 'string' ? w.address : '';
+        if (!isAddress(addr)) { console.warn('Skipping invalid address in config:', addr); continue; }
+        out.push({
+          user: uname,
+          label: typeof w?.label === 'string' ? w.label : undefined,
+          address: getAddress(addr),
+      email: (typeof w?.email === 'string' && w.email.includes('@')) ? w.email : uemail
+        });
+      }
+    }
+    return out;
+  } catch (e) {
+    console.error('Failed to parse wallets.json:', e?.message || e);
+    return [];
   }
-  return Array.from(set);
+}
+
+function normalizeAddresses(arr) {
+  const map = new Map(); // address -> entry
+  for (const raw of arr) {
+    let entry = null;
+    if (typeof raw === 'string') {
+      const parsed = parseAddrLabel(raw);
+      if (parsed && parsed.address) entry = { address: getAddress(parsed.address), label: (parsed.label || '').trim() };
+    } else if (raw && raw.address) {
+      entry = {
+        address: getAddress(raw.address),
+        label: (raw.label || '').trim() || undefined,
+        user: raw.user || undefined,
+        email: raw.email || undefined
+      };
+    }
+    if (!entry || !isAddress(entry.address)) { console.warn('Skipping invalid address:', raw?.address || raw); continue; }
+    const prev = map.get(entry.address) || {};
+    map.set(entry.address, { address: entry.address, label: entry.label ?? prev.label, user: entry.user ?? prev.user, email: entry.email ?? prev.email });
+  }
+  return Array.from(map.values());
 }
 
 // nodemailer config (prefer env, else fallback to provided sample)
@@ -178,12 +252,13 @@ function fmtMicroUSD(m) {
   return `${neg ? '-' : ''}${int.toString()}.${fracStr}`;
 }
 
-async function sendEmail(subject, text) {
-  if (!emailTo) return;
+async function sendEmail(subject, text, toOverride) {
+  const to = toOverride || emailTo;
+  if (!to) return;
   try {
     await transporter.sendMail({
       from: process.env.EMAIL_FROM || (process.env.SMTP_USER || 'watcher@example.com'),
-      to: emailTo,
+      to,
       subject,
       text
     });
@@ -193,12 +268,22 @@ async function sendEmail(subject, text) {
 }
 
 // Per-wallet state
-const walletState = new Map(); // address -> { lastUsdMicro: BigInt | null }
+const walletState = new Map(); // address -> { lastUsdMicro: BigInt | null, label?, user?, email? }
 
 function shortAddr(a) { return a.slice(0, 6) + '...' + a.slice(-4); }
+function labelOf(entry) {
+  if (entry.label && entry.user) return `${entry.user}/${entry.label}`;
+  if (entry.label) return entry.label;
+  if (entry.user) return entry.user;
+  return shortAddr(entry.address);
+}
 
-async function processWallet(address) {
-  const state = walletState.get(address) || { lastUsdMicro: null };
+async function processWallet(entry) {
+  const { address } = entry;
+  const state = walletState.get(address) || { lastUsdMicro: null, label: entry.label, user: entry.user, email: entry.email };
+  state.label = entry.label ?? state.label;
+  state.user = entry.user ?? state.user;
+  state.email = entry.email ?? state.email;
   const snap = await fetchAllBalances(address);
   const totalUsdMicro = snap.reduce((acc, it) => acc + (it.error ? 0n : calcUsdMicro(it)), 0n);
   const anyErrors = snap.some((it) => !!it.error);
@@ -206,7 +291,7 @@ async function processWallet(address) {
   if (state.lastUsdMicro === null) {
     state.lastUsdMicro = totalUsdMicro;
     walletState.set(address, state);
-    console.log(`[init] ${shortAddr(address)} ≈ ~$${fmtMicroUSD(totalUsdMicro)}`);
+    console.log(`[init] ${labelOf({ ...state, address })} (${shortAddr(address)}) ≈ ~$${fmtMicroUSD(totalUsdMicro)}`);
     return null;
   }
 
@@ -215,7 +300,7 @@ async function processWallet(address) {
   const thresholdMicro = BigInt(Math.round(usdDelta * 1e6));
   let shouldEmail = deltaMicro >= thresholdMicro;
   if (shouldEmail && !allowErrorsForEmail && anyErrors) {
-    console.log(`[skip] ${shortAddr(address)} change but some networks errored.`);
+    console.log(`[skip] ${prettyName(address)} change but some networks errored.`);
     shouldEmail = false;
   }
 
@@ -227,7 +312,7 @@ async function processWallet(address) {
       const confirmMicro = confirmSnap.reduce((acc, it) => acc + (it.error ? 0n : calcUsdMicro(it)), 0n);
       const confirmDelta = (confirmMicro >= last) ? (confirmMicro - last) : (last - confirmMicro);
       if (confirmDelta < thresholdMicro) {
-        console.log(`[skip] ${shortAddr(address)} change did not confirm.`);
+        console.log(`[skip] ${prettyName(address)} change did not confirm.`);
         shouldEmail = false;
       } else {
         chosenSnap = confirmSnap;
@@ -237,11 +322,12 @@ async function processWallet(address) {
   }
 
   if (!shouldEmail) {
-    console.log(`[tick] ${shortAddr(address)} ~$${fmtMicroUSD(totalUsdMicro)} (Δ ${fmtMicroUSD(deltaMicro)} < ${usdDelta})`);
+    console.log(`[tick] ${labelOf({ ...state, address })} (${shortAddr(address)}) ~$${fmtMicroUSD(totalUsdMicro)} (Δ ${fmtMicroUSD(deltaMicro)} < ${usdDelta})`);
     return null;
   }
 
   const lines = [
+    `User: ${state.user ?? '-'}  Label: ${state.label ?? '-'}`,
     `Address: ${address}`,
     `Change: ~$${fmtMicroUSD(deltaMicro)}`,
     `Now: ~$${fmtMicroUSD(chosenTotal)}`,
@@ -254,7 +340,7 @@ async function processWallet(address) {
     })
   ];
 
-  return { address, deltaMicro, totalUsdMicro: chosenTotal, lines };
+  return { address, deltaMicro, totalUsdMicro: chosenTotal, lines, email: state.email, user: state.user, label: state.label };
 }
 
 async function pMap(items, mapper, limit) {
@@ -271,35 +357,49 @@ async function pMap(items, mapper, limit) {
   return ret;
 }
 
-async function runCycle(addresses) {
-  console.log(`Cycle start: ${addresses.length} wallet(s), concurrency ${concurrency}`);
-  const results = await pMap(addresses, (a) => processWallet(a), concurrency);
+async function runCycle(entries) {
+  console.log(`Cycle start: ${entries.length} wallet(s), concurrency ${concurrency}`);
+  const results = await pMap(entries, (e) => processWallet(e), concurrency);
   const changes = results.filter((r) => r && typeof r === 'object');
   if (changes.length > 0) {
-    const subject = `Wallet changes this cycle: ${changes.length} wallet(s)`;
-    const body = changes.map((c) => c.lines.join('\n')).join('\n\n---\n\n');
-    await sendEmail(subject, body);
-    // Update state after email attempt (even if emailTo missing, advance state to avoid repeated alerts)
+    // group by recipient email (fallback to global if missing)
+    const groups = new Map(); // email -> array of changes
+    for (const c of changes) {
+      const key = (c.email && c.email.includes('@')) ? c.email : (emailTo || '');
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    for (const [to, arr] of groups) {
+      if (!to) { console.warn('No recipient email configured for some wallets; skipping email.'); continue; }
+      const subject = `Wallet changes this cycle: ${arr.length} wallet(s)`;
+      const body = arr.map((c) => {
+        const header = `User: ${c.user ?? '-'}  Label: ${c.label ?? '-'}  (${shortAddr(c.address)})`;
+        return [header, ...c.lines].join('\n');
+      }).join('\n\n---\n\n');
+      await sendEmail(subject, body, to);
+      console.log(`[email] ${subject} -> ${to}`);
+    }
+    // Update state after emails
     for (const c of changes) {
       const st = walletState.get(c.address) || { lastUsdMicro: null };
       st.lastUsdMicro = c.totalUsdMicro;
       walletState.set(c.address, st);
     }
-    console.log(`[email] ${subject}`);
   }
   console.log(`Cycle end.`);
 }
 
 async function main() {
+  const fromJson = await readAddressesFromJsonMaybe();
   const fromFile = await readAddressesFromFileMaybe();
-  const allAddrs = normalizeAddresses([...positional, ...fromFile]);
-  if (allAddrs.length === 0) {
+  const all = normalizeAddresses([...positional, ...fromFile, ...fromJson]); // [{address,label,user?,email?}]
+  if (all.length === 0) {
     usageAndExit();
     return;
   }
-  console.log(`Watching ${allAddrs.length} wallet(s) across ${selected.length} networks (interval ${intervalMs}ms, threshold ~$${usdDelta})`);
-  await runCycle(allAddrs);
-  setInterval(() => { runCycle(allAddrs).catch(() => {}); }, intervalMs);
+  console.log(`Watching ${all.length} wallet(s) across ${selected.length} networks (interval ${intervalMs}ms, threshold ~$${usdDelta})`);
+  await runCycle(all);
+  setInterval(() => { runCycle(all).catch(() => {}); }, intervalMs);
 }
 
 await main();
