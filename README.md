@@ -113,3 +113,10 @@ eth, polygon, bsc, arbitrum, optimism, base, avalanche, fantom, gnosis, linea, z
 Notes
 - Public RPCs can be rate-limited or slow; prefer provider RPCs (Alchemy/Infura/QuickNode/etc.).
 - Balances shown are native coin amounts (ETH, MATIC, BNB, etc.).
+
+Web + Server (optional)
+- Server (Express) in ./server:
+	- API: GET/POST /api/wallets, GET /api/status, POST /api/watcher/start|stop
+	- Start: from repo root, run the server with Node 18+
+- Web (React + Vite) in ./web:
+	- Dev: from ./web run npm install && npm run dev
