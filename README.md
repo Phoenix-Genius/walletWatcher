@@ -57,34 +57,26 @@ Run
 Watch wallets and email on ~$0.1 changes
 - Configure SMTP (env or defaults):
 	- .env keys: SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, EMAIL_TO, EMAIL_FROM
-- Run daemon watcher (single or multiple addresses):
+- Run daemon watcher (JSON config only):
 	- bash
-	- npm run watch -- 0xYourAddress --usdDelta=0.1 --interval=30000 --only=eth,polygon,bsc
-	- npm run watch -- 0xAddr1 0xAddr2 0xAddr3 --usdDelta=0.1 --interval=30000
-	- Preferred: create `wallets.json` with structure:
+	- Create `wallets.json` with structure:
 	  [
 	    {
 	      "user": "alex",
+	      "email": "alex@example.com",           # default email for this user's wallets
 	      "wallets": [
-	        { "label": "exodus", "address": "0x...", "email": "alex@example.com" }
+	        { "label": "exodus", "address": "0x..." },
+	        "0xabc...123 metamask",               # string format: address [label] [email]
+	        "0xdef...456 exodus alex+alt@mail.com" # wallet-level email override
 	      ]
 	    }
 	  ]
 	  Then run: npm run watch -- --config=wallets.json --usdDelta=0.1 --interval=30000
-	- Legacy: place addresses in a file named `wallet-addresses` (one per line) and just run:
-	- npm run watch -- --usdDelta=0.1 --interval=30000
-	- Use a custom file name with --file=addresses.txt
 	- Omit --only to watch all configured networks.
 
 Watch multiple wallets
-- Preferred: `wallets.json` supports per-wallet labels and emails under each user; emails are grouped per recipient each cycle.
-- Legacy: place one address per line in `wallet-addresses` (default file name) or pass a custom file via `--file=...`.
-- You can also pass multiple addresses positionally.
-- You can label wallets by adding a label alongside the address. Supported formats per line:
-	- `0xAddress, My Label`
-	- `My Label, 0xAddress`
-	- `My Label 0xAddress` (space separated)
-	The label will appear in logs and emails as `My Label (0x1234...abcd)`.
+- `wallets.json` supports per-wallet labels and emails under each user; emails are grouped per recipient each cycle.
+- String entry format allowed: `0xAddress [label words] [email@domain]`.
 - The watcher maintains per-wallet state and sends a single aggregated email per cycle with all changed wallets.
 
 Watcher details

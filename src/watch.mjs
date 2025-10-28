@@ -17,25 +17,18 @@ const ERC20_ABI = [
 const tokenMetaCache = new Map();
 
 function usageAndExit() {
-  console.error('Usage: npm run watch -- [--config=wallets.json] [<EVM_ADDRESS> ...] [--file=wallet-addresses] [--only=eth,polygon,...] [--interval=30000] [--usdDelta=0.1] [--emailTo=addr] [--concurrency=50]');
-  console.error('Tips:');
-  console.error(' - Preferred: provide wallets in wallets.json as [{"user":"alex","wallets":[{"label":"exodus","address":"0x...","email":"you@example.com"}]}]');
-  console.error(' - Legacy: one address per line in wallet-addresses (comments supported).');
+  console.error('Usage: npm run watch -- --config=wallets.json [--only=eth,polygon,...] [--interval=30000] [--usdDelta=0.1] [--concurrency=50]');
+  console.error('Config wallets.json supports objects or strings per wallet:');
+  console.error('  { "user": "alex", "email": "alex@mail", "wallets": [ {"address":"0x...","label":"exodus"}, "0x... metamask alex+alt@mail" ] }');
   process.exit(1);
 }
 
 const argv = process.argv.slice(2);
-
-// Split positional args and flags
-const positional = [];
 const opts = {};
 for (const a of argv) {
-  if (a.startsWith('--')) {
-    const [k, v = 'true'] = a.slice(2).split('=');
-    opts[k] = v;
-  } else {
-    positional.push(a);
-  }
+  if (!a.startsWith('--')) continue;
+  const [k, v = 'true'] = a.slice(2).split('=');
+  opts[k] = v;
 }
 
 const only = opts.only ? String(opts.only).split(',').map((s) => s.trim().toLowerCase()).filter(Boolean) : null;
@@ -46,50 +39,26 @@ const emailTo = opts.emailTo || process.env.EMAIL_TO;
 const allowErrorsForEmail = (opts.allowErrors || process.env.ALLOW_ERRORS_FOR_EMAIL || 'false') === 'true';
 const concurrency = Math.max(1, Number(opts.concurrency || process.env.CONCURRENCY || 50));
 
-// Resolve addresses: JSON config (default: ./wallets.json), legacy file (./wallet-addresses), positional
+// Resolve addresses: JSON config (default: ./wallets.json)
 const configPath = resolvePath(process.cwd(), String(opts.config || 'wallets.json'));
-const filePath = resolvePath(process.cwd(), String(opts.file || 'wallet-addresses'));
-function parseAddrLabel(input) {
-  const line = input.trim();
+
+// Parse a line like "0xAddr [label words ...] [email@domain]"; label and email are optional.
+function parseAddrLabelEmail(input) {
+  const line = String(input || '').trim();
   if (!line) return null;
-  // CSV style first
-  const parts = line.split(',').map((s) => s.trim()).filter(Boolean);
-  const isAddr = (x) => {
-    try { return isAddress(x); } catch { return false; }
-  };
-  if (parts.length >= 2) {
-    if (isAddr(parts[0])) return { address: getAddress(parts[0]), label: parts.slice(1).join(',') };
-    if (isAddr(parts[parts.length - 1])) return { address: getAddress(parts[parts.length - 1]), label: parts.slice(0, -1).join(',') };
-  }
-  // Whitespace split fallback
   const tokens = line.split(/\s+/).filter(Boolean);
-  if (tokens.length >= 2) {
-    const addrIdx = tokens.findIndex((t) => isAddr(t));
-    if (addrIdx >= 0) {
-      const addr = getAddress(tokens[addrIdx]);
-      const labelTokens = tokens.slice(0, addrIdx).concat(tokens.slice(addrIdx + 1));
-      const label = labelTokens.join(' ').trim();
-      return { address: addr, label };
-    }
-  }
-  // Single token: maybe just address
-  if (isAddr(line)) return { address: getAddress(line), label: '' };
-  return null;
+  const isAddr = (x) => { try { return isAddress(x); } catch { return false; } };
+  const addrIdx = tokens.findIndex((t) => isAddr(t));
+  if (addrIdx === -1) return null;
+  const addr = getAddress(tokens[addrIdx]);
+  const emailIdx = tokens.findIndex((t) => t.includes('@'));
+  const email = emailIdx >= 0 ? tokens[emailIdx] : undefined;
+  const labelParts = tokens.filter((t, i) => i !== addrIdx && i !== emailIdx);
+  const label = labelParts.length ? labelParts.join(' ').trim() : undefined;
+  return { address: addr, label, email };
 }
 
-async function readAddressesFromFileMaybe() {
-  if (!existsSync(filePath)) return [];
-  const raw = await readFile(filePath, 'utf8');
-  const out = [];
-  for (const line of raw.split(/\r?\n/)) {
-    const t = line.trim();
-    if (!t || t.startsWith('#') || t.startsWith('//') || t.startsWith(';')) continue;
-    const parsed = parseAddrLabel(t);
-    if (!parsed) { console.warn('Skipping invalid address/line in file:', t); continue; }
-    out.push(parsed); // { address, label }
-  }
-  return out;
-}
+// legacy file parsing removed for optimization
 
 async function readAddressesFromJsonMaybe() {
   if (!existsSync(configPath)) return [];
@@ -103,14 +72,20 @@ async function readAddressesFromJsonMaybe() {
     const uemail = typeof user?.email === 'string' && user.email.includes('@') ? user.email : undefined;
       const wallets = Array.isArray(user?.wallets) ? user.wallets : [];
       for (const w of wallets) {
-        const addr = typeof w?.address === 'string' ? w.address : '';
-        if (!isAddress(addr)) { console.warn('Skipping invalid address in config:', addr); continue; }
-        out.push({
-          user: uname,
-          label: typeof w?.label === 'string' ? w.label : undefined,
-          address: getAddress(addr),
-      email: (typeof w?.email === 'string' && w.email.includes('@')) ? w.email : uemail
-        });
+        if (typeof w === 'string') {
+          const parsed = parseAddrLabelEmail(w);
+          if (!parsed) { console.warn('Skipping invalid wallet entry:', w); continue; }
+          out.push({ user: uname, address: parsed.address, label: parsed.label, email: parsed.email || uemail });
+        } else {
+          const addr = typeof w?.address === 'string' ? w.address : '';
+          if (!isAddress(addr)) { console.warn('Skipping invalid address in config:', addr); continue; }
+          out.push({
+            user: uname,
+            label: typeof w?.label === 'string' ? w.label : undefined,
+            address: getAddress(addr),
+            email: (typeof w?.email === 'string' && w.email.includes('@')) ? w.email : uemail
+          });
+        }
       }
     }
     return out;
@@ -123,21 +98,15 @@ async function readAddressesFromJsonMaybe() {
 function normalizeAddresses(arr) {
   const map = new Map(); // address -> entry
   for (const raw of arr) {
-    let entry = null;
-    if (typeof raw === 'string') {
-      const parsed = parseAddrLabel(raw);
-      if (parsed && parsed.address) entry = { address: getAddress(parsed.address), label: (parsed.label || '').trim() };
-    } else if (raw && raw.address) {
-      entry = {
-        address: getAddress(raw.address),
-        label: (raw.label || '').trim() || undefined,
-        user: raw.user || undefined,
-        email: raw.email || undefined
-      };
-    }
-    if (!entry || !isAddress(entry.address)) { console.warn('Skipping invalid address:', raw?.address || raw); continue; }
-    const prev = map.get(entry.address) || {};
-    map.set(entry.address, { address: entry.address, label: entry.label ?? prev.label, user: entry.user ?? prev.user, email: entry.email ?? prev.email });
+    if (!raw || !raw.address || !isAddress(raw.address)) { console.warn('Skipping invalid address:', raw?.address || raw); continue; }
+    const address = getAddress(raw.address);
+    const prev = map.get(address) || {};
+    map.set(address, {
+      address,
+      label: (raw.label || prev.label || '').trim() || undefined,
+      user: raw.user ?? prev.user,
+      email: raw.email ?? prev.email
+    });
   }
   return Array.from(map.values());
 }
@@ -300,7 +269,7 @@ async function processWallet(entry) {
   const thresholdMicro = BigInt(Math.round(usdDelta * 1e6));
   let shouldEmail = deltaMicro >= thresholdMicro;
   if (shouldEmail && !allowErrorsForEmail && anyErrors) {
-    console.log(`[skip] ${prettyName(address)} change but some networks errored.`);
+    console.log(`[skip] ${labelOf({ ...state, address })} change but some networks errored.`);
     shouldEmail = false;
   }
 
@@ -312,7 +281,7 @@ async function processWallet(entry) {
       const confirmMicro = confirmSnap.reduce((acc, it) => acc + (it.error ? 0n : calcUsdMicro(it)), 0n);
       const confirmDelta = (confirmMicro >= last) ? (confirmMicro - last) : (last - confirmMicro);
       if (confirmDelta < thresholdMicro) {
-        console.log(`[skip] ${prettyName(address)} change did not confirm.`);
+        console.log(`[skip] ${labelOf({ ...state, address })} change did not confirm.`);
         shouldEmail = false;
       } else {
         chosenSnap = confirmSnap;
@@ -391,8 +360,7 @@ async function runCycle(entries) {
 
 async function main() {
   const fromJson = await readAddressesFromJsonMaybe();
-  const fromFile = await readAddressesFromFileMaybe();
-  const all = normalizeAddresses([...positional, ...fromFile, ...fromJson]); // [{address,label,user?,email?}]
+  const all = normalizeAddresses(fromJson); // [{address,label,user?,email?}]
   if (all.length === 0) {
     usageAndExit();
     return;
