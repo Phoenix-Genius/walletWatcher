@@ -4,14 +4,17 @@ import morgan from 'morgan';
 import { readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawn } from 'node:child_process';
-import { resolve as resolvePath } from 'node:path';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(morgan('dev'));
 
-const ROOT = process.cwd();
+// Compute project root relative to this server file, not the current working directory
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolvePath(__dirname, '..');
 const CONFIG_PATH = resolvePath(ROOT, 'wallets.json');
 const WATCH_SCRIPT = resolvePath(ROOT, 'src', 'watch.mjs');
 
@@ -19,7 +22,10 @@ let watcherProc = null;
 
 function startWatcher(args = []) {
   if (watcherProc) return { ok: false, message: 'already running' };
+  console.log('[watcher]', 'ROOT =', ROOT);
+  console.log('[watcher]', 'WATCH_SCRIPT =', WATCH_SCRIPT);
   const spawnArgs = [WATCH_SCRIPT, '--config=wallets.json', ...args];
+  console.log('[watcher]', 'spawn:', 'node', spawnArgs.join(' '));
   watcherProc = spawn('node', spawnArgs, { cwd: ROOT, stdio: 'inherit' });
   watcherProc.on('exit', (code) => { console.log('watcher exited', code); watcherProc = null; });
   return { ok: true };
