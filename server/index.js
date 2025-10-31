@@ -19,6 +19,8 @@ const CONFIG_PATH = resolvePath(ROOT, 'wallets.json');
 const WATCH_SCRIPT = resolvePath(ROOT, 'src', 'watch.mjs');
 
 let watcherProc = null;
+const logBuffer = [];
+const MAX_LOG_LINES = 500;
 
 function startWatcher(args = []) {
   if (watcherProc) return { ok: false, message: 'already running' };
@@ -26,7 +28,18 @@ function startWatcher(args = []) {
   console.log('[watcher]', 'WATCH_SCRIPT =', WATCH_SCRIPT);
   const spawnArgs = [WATCH_SCRIPT, '--config=wallets.json', ...args];
   console.log('[watcher]', 'spawn:', 'node', spawnArgs.join(' '));
-  watcherProc = spawn('node', spawnArgs, { cwd: ROOT, stdio: 'inherit' });
+  watcherProc = spawn('node', spawnArgs, { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  const onData = (chunk, isErr = false) => {
+    const text = chunk.toString();
+    process[isErr ? 'stderr' : 'stdout'].write(text);
+    for (const line of text.split(/\r?\n/)) {
+      if (!line) continue;
+      logBuffer.push((isErr ? '[err] ' : '') + line);
+      if (logBuffer.length > MAX_LOG_LINES) logBuffer.splice(0, logBuffer.length - MAX_LOG_LINES);
+    }
+  };
+  watcherProc.stdout.on('data', (c) => onData(c, false));
+  watcherProc.stderr.on('data', (c) => onData(c, true));
   watcherProc.on('exit', (code) => { console.log('watcher exited', code); watcherProc = null; });
   return { ok: true };
 }
@@ -65,6 +78,12 @@ app.get('/api/wallets', async (_, res) => {
 });
 app.post('/api/wallets', async (req, res) => {
   try { await writeConfig(req.body || []); res.json({ ok: true }); } catch (e) { res.status(500).json({ error: String(e.message || e) }); }
+});
+
+app.get('/api/logs', (req, res) => {
+  const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 200)));
+  const lines = logBuffer.slice(-limit);
+  res.json({ lines });
 });
 
 const port = Number(process.env.PORT || 4000);

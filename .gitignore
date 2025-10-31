@@ -1,5 +1,11 @@
 # dependencies
 /node_modules
+/server/node_modules/
+/web/node_modules/
+
+# lock files (optional in this repo)
+/server/package-lock.json
+/web/package-lock.json
 
 # env files
 .env
