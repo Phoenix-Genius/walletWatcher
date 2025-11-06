@@ -156,6 +156,9 @@ function App() {
 
   <div className="card" style={{flex:1}}>
           <h2 style={{marginTop:0}}>Config (wallets.json)</h2>
+          <div className="muted" style={{marginBottom:6}}>
+            Tip: You can add non‑EVM wallets using prefixes: <code>sol:ADDRESS</code> or <code>tron:ADDRESS</code> (label and email still work).
+          </div>
           <div className="row" style={{gap:8, flexWrap:'wrap', marginBottom:8}}>
             <input style={{minWidth:260}} placeholder="0x... wallet address" value={quick.address} onChange={e=>setQuick(q=>({...q,address:e.target.value}))} />
             <input style={{minWidth:160}} placeholder="label (optional)" value={quick.label} onChange={e=>setQuick(q=>({...q,label:e.target.value}))} />

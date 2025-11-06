@@ -6,6 +6,8 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 import { networks, getRpcUrl } from './networks.mjs';
+import { fetchSolanaBalances } from './adapters/solana.mjs';
+import { fetchTronBalances } from './adapters/tron.mjs';
 
 const ERC20_ABI = [
   'function balanceOf(address owner) view returns (uint256)',
@@ -42,20 +44,45 @@ const concurrency = Math.max(1, Number(opts.concurrency || process.env.CONCURREN
 // Resolve addresses: JSON config (default: ./wallets.json)
 const configPath = resolvePath(process.cwd(), String(opts.config || 'wallets.json'));
 
-// Parse a line like "0xAddr [label words ...] [email@domain]"; label and email are optional.
+// Parse a line like "[chain:]address [label words ...] [email@domain]"; label and email are optional.
+// Supported chains: evm (default), sol, tron, btc (btc reserved)
 function parseAddrLabelEmail(input) {
   const line = String(input || '').trim();
   if (!line) return null;
   const tokens = line.split(/\s+/).filter(Boolean);
-  const isAddr = (x) => { try { return isAddress(x); } catch { return false; } };
-  const addrIdx = tokens.findIndex((t) => isAddr(t));
-  if (addrIdx === -1) return null;
-  const addr = getAddress(tokens[addrIdx]);
+  let chain = 'evm';
+  let addrTokenIdx = -1;
+  // detect explicit chain prefix in the first token (e.g., sol:..., tron:...)
+  const first = tokens[0] || '';
+  const m = first.match(/^(evm|sol|tron|btc):(.+)$/i);
+  if (m) {
+    chain = m[1].toLowerCase();
+    addrTokenIdx = 0; // address is embedded in same token
+  }
+  // helper validators (lightweight)
+  const isEvm = (x) => { try { return isAddress(x); } catch { return false; } };
+  const isSol = (x) => /^([1-9A-HJ-NP-Za-km-z]{32,48})$/.test(x);
+  const isTron = (x) => /^T[1-9A-HJ-NP-Za-km-z]{25,34}$/.test(x);
+
+  let rawAddr = '';
+  if (addrTokenIdx === 0) {
+    rawAddr = m[2];
+  } else {
+    // find address token depending on chain (default evm)
+    const idx = tokens.findIndex((t) => isEvm(t) || isSol(t) || isTron(t));
+    if (idx === -1) return null;
+    rawAddr = tokens[idx];
+    if (isSol(rawAddr)) chain = 'sol';
+    else if (isTron(rawAddr)) chain = 'tron';
+    else chain = 'evm';
+    addrTokenIdx = idx;
+  }
+  const addr = (chain === 'evm') ? getAddress(rawAddr) : rawAddr;
   const emailIdx = tokens.findIndex((t) => t.includes('@'));
   const email = emailIdx >= 0 ? tokens[emailIdx] : undefined;
-  const labelParts = tokens.filter((t, i) => i !== addrIdx && i !== emailIdx);
+  const labelParts = tokens.filter((t, i) => i !== addrTokenIdx && i !== emailIdx);
   const label = labelParts.length ? labelParts.join(' ').trim() : undefined;
-  return { address: addr, label, email };
+  return { chain, address: addr, label, email };
 }
 
 // legacy file parsing removed for optimization
@@ -75,14 +102,17 @@ async function readAddressesFromJsonMaybe() {
         if (typeof w === 'string') {
           const parsed = parseAddrLabelEmail(w);
           if (!parsed) { console.warn('Skipping invalid wallet entry:', w); continue; }
-          out.push({ user: uname, address: parsed.address, label: parsed.label, email: parsed.email || uemail });
+          out.push({ user: uname, chain: parsed.chain, address: parsed.address, label: parsed.label, email: parsed.email || uemail });
         } else {
+          const chain = typeof w?.chain === 'string' ? String(w.chain).toLowerCase() : 'evm';
           const addr = typeof w?.address === 'string' ? w.address : '';
-          if (!isAddress(addr)) { console.warn('Skipping invalid address in config:', addr); continue; }
+          if (chain === 'evm' && !isAddress(addr)) { console.warn('Skipping invalid EVM address in config:', addr); continue; }
+          // for non-evm we keep the raw address; minimal validation
           out.push({
             user: uname,
             label: typeof w?.label === 'string' ? w.label : undefined,
-            address: getAddress(addr),
+            chain,
+            address: chain === 'evm' ? getAddress(addr) : addr,
             email: (typeof w?.email === 'string' && w.email.includes('@')) ? w.email : uemail
           });
         }
@@ -98,11 +128,13 @@ async function readAddressesFromJsonMaybe() {
 function normalizeAddresses(arr) {
   const map = new Map(); // address -> entry
   for (const raw of arr) {
-    if (!raw || !raw.address || !isAddress(raw.address)) { console.warn('Skipping invalid address:', raw?.address || raw); continue; }
-    const address = getAddress(raw.address);
+    if (!raw || !raw.address) { console.warn('Skipping invalid address:', raw?.address || raw); continue; }
+    const chain = raw.chain || 'evm';
+    const address = chain === 'evm' ? getAddress(raw.address) : String(raw.address);
     const prev = map.get(address) || {};
     map.set(address, {
       address,
+      chain,
       label: (raw.label || prev.label || '').trim() || undefined,
       user: raw.user ?? prev.user,
       email: raw.email ?? prev.email
@@ -154,7 +186,7 @@ async function getProvider(net) {
   throw new Error(`No RPC available for ${net.name}`);
 }
 
-async function fetchAllBalances(address) {
+async function fetchAllBalancesEvm(address) {
   const out = [];
   for (const net of selected) {
     try {
@@ -248,12 +280,21 @@ function labelOf(entry) {
 }
 
 async function processWallet(entry) {
-  const { address } = entry;
+  const { address, chain = 'evm' } = entry;
   const state = walletState.get(address) || { lastUsdMicro: null, label: entry.label, user: entry.user, email: entry.email };
   state.label = entry.label ?? state.label;
   state.user = entry.user ?? state.user;
   state.email = entry.email ?? state.email;
-  const snap = await fetchAllBalances(address);
+  let snap = [];
+  if (chain === 'evm') {
+    snap = await fetchAllBalancesEvm(address);
+  } else if (chain === 'sol') {
+    try { const r = await fetchSolanaBalances(address); snap = [r]; } catch (e) { snap = [{ net: { key: 'sol', name: 'Solana' }, error: e?.message || String(e) }]; }
+  } else if (chain === 'tron') {
+    try { const r = await fetchTronBalances(address); snap = [r]; } catch (e) { snap = [{ net: { key: 'tron', name: 'Tron' }, error: e?.message || String(e) }]; }
+  } else {
+    snap = [{ net: { key: chain, name: chain }, error: 'unsupported chain' }];
+  }
   const totalUsdMicro = snap.reduce((acc, it) => acc + (it.error ? 0n : calcUsdMicro(it)), 0n);
   const anyErrors = snap.some((it) => !!it.error);
 
@@ -301,7 +342,7 @@ async function processWallet(entry) {
     `Change: ~$${fmtMicroUSD(deltaMicro)}`,
     `Now: ~$${fmtMicroUSD(chosenTotal)}`,
     '',
-    ...chosenSnap.map((it) => {
+  ...chosenSnap.map((it) => {
       if (it.error) return `- ${it.net.name}: ERROR ${it.error}`;
       const usdt = it.tokens.USDT && !it.tokens.USDT.error ? it.tokens.USDT.formatted : '0';
       const usdc = it.tokens.USDC && !it.tokens.USDC.error ? it.tokens.USDC.formatted : '0';
@@ -365,7 +406,7 @@ async function main() {
     usageAndExit();
     return;
   }
-  console.log(`Watching ${all.length} wallet(s) across ${selected.length} networks (interval ${intervalMs}ms, threshold ~$${usdDelta})`);
+  console.log(`Watching ${all.length} wallet(s) across ${selected.length} EVM networks (+ non-EVM where specified) (interval ${intervalMs}ms, threshold ~$${usdDelta})`);
   await runCycle(all);
   setInterval(() => { runCycle(all).catch(() => {}); }, intervalMs);
 }
